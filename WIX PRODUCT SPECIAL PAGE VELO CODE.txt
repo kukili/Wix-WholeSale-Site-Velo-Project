@@ -1,0 +1,391 @@
+
+
+
+
+////  BU DOSYALAR KULLANIMDADIR
+////
+////
+////  BU DOSYALAR KULLANIMDADIR
+////  
+////  
+////  BU DOSYALAR KULLANIMDADIR
+
+
+import { cart } from 'wix-stores-frontend';
+import wixLocationFrontend from 'wix-location-frontend';
+import { navigateToCheckoutPage } from 'wix-ecom-frontend';
+import { currentCart } from "wix-ecom-backend";
+import { refreshCart } from 'wix-ecom-frontend';
+import { addProductToCurrentCart } from 'backend/cart';
+import { currentMember, authentication } from "wix-members-frontend";
+import wixMembersFrontend from "wix-members-frontend";
+import wixData from 'wix-data';
+import wixUsers from 'wix-users';
+import wixLocation from 'wix-location';
+import wixWindow from 'wix-window';
+import { lightbox } from "@wix/site-window";
+
+let currentProduct;
+let quantityStep    = 1;
+let currentQuantity = 1;
+
+const WISHLIST_COLLECTION = "Import1";  
+const FALLBACK_IDS        = ["#productPage", "#productPage1", "#productPage2"];
+
+function normalizeWixImage(media) {
+  if (!media) return "";
+  const str = String(media);
+  if (/^https?:\/\//i.test(str)) return str;
+  const m = str.match(/^wix:image:\/\/v1\/([^/]+)\/file/i);
+  return m ? `https://static.wixstatic.com/media/${m[1]}` : str;
+}
+function htmlTemizle(s){
+  return !s || typeof s!=='string' ? "" : s.replace(/<[^>]*>/g," ").replace(/&nbsp;/g," ").replace(/\s\s+/g," ").trim();
+}
+function safeEnable(ctrl, enabled){
+  try{ ctrl && (enabled ? ctrl.enable() : ctrl.disable()); }catch(_){}
+}
+async function getMemberSafe(){
+  try{ return await currentMember.getMember({ fieldsets:['FULL'] }); }catch{ return undefined; }
+}
+
+async function findWishlistItemId(userId, productId) {
+  const res = await wixData
+    .query(WISHLIST_COLLECTION)
+    .eq("userId", userId)
+    .eq("productId", productId)
+    .limit(1)
+    .find();
+  return res.items?.[0]?._id || null;
+}
+function setWishlistUI(isIn) {
+  try {
+    const emptyHeart  = $w("#DeleteFromWishListEmpty");
+    const filledHeart = $w("#addToWishListFilled");
+    if (isIn) { filledHeart?.show(); emptyHeart?.hide(); }
+    else      { emptyHeart?.show();  filledHeart?.hide(); }
+  } catch(_) {}
+}
+async function paintWishlistState() {
+  try{
+    if(!currentProduct?._id) { setWishlistUI(false); return; }
+    const member = await getMemberSafe();
+    if(!member?._id)         { setWishlistUI(false); return; }
+    const existsId = await findWishlistItemId(member._id, currentProduct._id);
+    setWishlistUI(!!existsId);
+  }catch(e){
+    console.error("paintWishlistState error:", e);
+    setWishlistUI(false);
+  }
+}
+
+/*
+function parseStepFromName(name) {
+  const m = /(?:\(\s*)?(\d{1,6})\s*adet\b/i.exec(name || "");
+  return m ? Math.max(1, parseInt(m[1],10) || 1) : 1;
+}
+*/
+
+function parseStepFromName(name) {
+  // Aranan kalıplar:
+  // (12 Adet x ₺25)
+  // (10 kutu x ₺114)
+  // (12Adetx ₺25)
+  const m = /(?:\(\s*)?(\d{1,6})\s*(?:adet|kutu|paket|set|çift|parça)?\s*x/i.exec(name || "");
+  return m ? Math.max(1, parseInt(m[1], 10) || 1) : 1;
+}
+
+
+function normalizeToStep(value, step) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return step;
+  return Math.max(step, Math.round(v / step) * step);
+}
+
+function normalizeToStepSafe(valueStr, step) {
+  const raw  = Number(valueStr);
+  const safe = Number.isFinite(raw) ? raw : step;
+  return normalizeToStep(Math.max(safe, step), step);
+}
+
+
+function lockButtons(a, b, locked) {
+  if (!a || !b) return;
+  if (locked) { a.disable(); b.disable(); } else { a.enable(); b.enable(); }
+}
+
+
+function safeSetText(
+  $elem,
+  text,
+  {
+    fontPx = 12,
+    lineH = 1.15,
+    color = '#000',
+    topPadPx = 0,
+    bottomPadPx = 0,
+    align = 'center',      
+    yShiftPx = -8,
+    containerHeightPx = 25
+  } = {}
+) {
+  if (!$elem) return;
+
+  let alignItems = 'center';
+  if (align === 'bottom') alignItems = 'flex-end';
+  if (align === 'top')    alignItems = 'flex-start';
+
+  const heightStyle = containerHeightPx ? `height:${containerHeightPx}px;` : `height:100%;`;
+
+  $elem.html = `
+    <div style="
+      display:flex;
+      align-items:${alignItems};
+      justify-content:center;
+      ${heightStyle}
+      width:100%;
+      box-sizing:border-box;
+      padding:${topPadPx}px 0 ${bottomPadPx}px 0;
+      margin:0;
+      color:${color};
+      font-weight:bold;
+      font-size:${fontPx}px;
+      line-height:${lineH};
+      text-align:center;
+      word-break:break-word;
+    ">
+      <span style="display:block;width:100%;text-align:center;transform: translateY(${yShiftPx}px);">
+        ${text}
+      </span>
+    </div>
+  `;
+}
+
+$w.onReady(async function () {
+
+
+  const img  = $w('#productImage');
+  const ovl  = $w('#zoomOverlay');  
+    const plus = $w('#zoomPlus');   
+
+    safeCollapse(ovl); 
+  safeCollapse(plus);
+
+  
+  const showHover = () => { safeExpand(ovl); safeExpand(plus); };
+  const hideHover = () => { safeCollapse(ovl); safeCollapse(plus); };
+
+  
+  [img, ovl, plus].forEach(el => {
+    el.onMouseIn(showHover);
+    el.onMouseOut(hideHover);
+    el.onClick(openZoom);
+  });
+
+  function openZoom() {
+    const src = img.src || '';
+    wixWindow.openLightbox('ZoomImage', { src });
+  }
+
+  function safeExpand($el){ try{ $el.expand?.(); }catch(_){} try{ $el.show?.(); }catch(_){} }
+  function safeCollapse($el){ try{ $el.collapse?.(); }catch(_){} try{ $el.hide?.(); }catch(_){} }
+
+  const productImage    = $w("#productImage");
+  const productName     = $w("#productName");
+  const productPrice    = $w("#productPrice");
+  const productDesc     = $w("#productDescription");
+
+  const quantityInput   = $w("#quantityInput");   
+  const plusButton      = $w("#plusButton");
+  const minusButton     = $w("#minusButton");
+
+  const addToCartButton = $w("#addToCartButton");
+  const buyNowButton    = $w("#buyNowButton");
+  const textInsideButtonCart = $w("#textInsideButtonCart"); 
+  const textInsideButtonBuy  = $w("#textInsideButtonBuy");  
+
+  const emptyHeart  = $w("#DeleteFromWishListEmpty");
+  const filledHeart = $w("#addToWishListFilled");
+
+  
+  lockButtons(addToCartButton, buyNowButton, true);
+
+  
+  let productPageElement = null;
+  for (const sel of FALLBACK_IDS) {
+    if ($w(sel) && typeof $w(sel).getProduct === "function") { productPageElement = $w(sel); break; }
+  }
+
+  try {
+    if (!productPageElement) {
+      console.warn("Product widget bulunamadı.");
+      lockButtons(addToCartButton, buyNowButton, false);
+      return;
+    }
+
+    const product = await productPageElement.getProduct();
+    if (!product) {
+      lockButtons(addToCartButton, buyNowButton, false);
+      return;
+    }
+
+    currentProduct = product;
+
+        
+    productName.text  = product.name || "";
+    productPrice.text = product.formattedPrice || "";
+    productDesc.text  = htmlTemizle(product.description);
+    if (product.mainMedia) productImage.src = normalizeWixImage(product.mainMedia);
+
+    
+    quantityStep  = parseStepFromName(product.name || "");
+    if (quantityStep === 1) {
+      const pcsMatch = (product.ribbon || "").match(/(\d{1,6})\s*pcs/i);
+      if (pcsMatch && pcsMatch[1]) quantityStep = Math.max(1, parseInt(pcsMatch[1],10) || 1);
+    }
+    currentQuantity = quantityStep;
+
+    
+    quantityInput.value = String(currentQuantity);
+
+    
+    safeSetText(textInsideButtonCart, "Sepete<br>Ekleyiniz");
+    safeSetText(textInsideButtonBuy,  "Satın<br>Alınız");
+
+    
+    await paintWishlistState();
+
+  } catch (e) {
+    console.error("getProduct error:", e);
+  } finally {
+    lockButtons(addToCartButton, buyNowButton, false);
+  }
+
+  
+  try {
+    authentication.onLogin(() => paintWishlistState());
+    authentication.onLogout(() => setWishlistUI(false));
+  } catch(_) {}
+
+  
+  plusButton.onClick(() => {
+    currentQuantity += quantityStep;
+    quantityInput.value = String(currentQuantity);
+  });
+
+  
+  minusButton.onClick(() => {
+    if (currentQuantity > quantityStep) {
+      currentQuantity -= quantityStep;
+      quantityInput.value = String(currentQuantity);
+    }
+  });
+
+  
+  quantityInput.onBlur(() => {
+    const normalized = normalizeToStepSafe(quantityInput.value, quantityStep);
+    currentQuantity = normalized;
+    quantityInput.value = String(normalized);
+  });
+
+  
+  if (quantityInput.onKeyPress) {
+    quantityInput.onKeyPress((ev) => {
+      if (ev.key === 'Enter') {
+        const normalized = normalizeToStepSafe(quantityInput.value, quantityStep);
+        currentQuantity = normalized;
+        quantityInput.value = String(normalized);
+      }
+    });
+  }
+
+  
+  const handleAddToCart = async () => {
+    if (!currentProduct?._id) return;
+
+    lockButtons(addToCartButton, buyNowButton, true);
+    safeSetText(textInsideButtonCart, "Sepete<br>Ekleniyor");
+
+    try {
+      await addProductToCurrentCart(currentProduct._id, currentQuantity);
+      await refreshCart();
+      safeSetText(textInsideButtonCart, "Sepete<br>Eklendi");
+
+      
+      setTimeout(() => safeSetText(textInsideButtonCart, "Sepete<br>Ekleyiniz"), 2000);
+    } catch (error) {
+      console.error("Add to cart error:", error);
+      safeSetText(textInsideButtonCart, "Hata!<br>Tekrar deneyin");
+    } finally {
+      lockButtons(addToCartButton, buyNowButton, false);
+    }
+  };
+
+  const handleBuyNow = async () => {
+    lockButtons(addToCartButton, buyNowButton, true);
+    safeSetText(textInsideButtonBuy, "Sepete<br>Gidiyoruz");
+    try {
+      
+      wixLocationFrontend.to("/karma-sepet");
+    } catch (error) {
+      console.error("Buy Now error:", error);
+      safeSetText(textInsideButtonBuy, "Hata");
+      setTimeout(() => safeSetText(textInsideButtonBuy, "Satın<br>Alınız"), 1500);
+      lockButtons(addToCartButton, buyNowButton, false);
+    }
+  };
+
+  
+  addToCartButton.onClick(handleAddToCart);
+  buyNowButton.onClick(handleBuyNow);
+  if (textInsideButtonCart?.onClick) textInsideButtonCart.onClick(handleAddToCart);
+  if (textInsideButtonBuy?.onClick)  textInsideButtonBuy.onClick(handleBuyNow);
+
+  
+  if (emptyHeart) emptyHeart.onClick(async () => {
+    if (!authentication.loggedIn()) {
+      try { await authentication.promptLogin({ mode: "login", modal: true }); } catch { return; }
+    }
+    try {
+      const member = await getMemberSafe();
+      if (!member?._id || !currentProduct?._id) return;
+
+  
+      const existsId = await findWishlistItemId(member._id, currentProduct._id);
+      if (existsId) { setWishlistUI(true); return; }
+
+      const imgUrl = normalizeWixImage(currentProduct.mainMedia);
+      const pageUrl = currentProduct.productPageUrl || "";
+
+      await wixData.insert(WISHLIST_COLLECTION, {
+        userId:         member._id,
+        productId:      currentProduct._id,
+        productImage:   imgUrl,
+        productName:    currentProduct.name || "",
+        productPrice:   currentProduct.formattedPrice || "",
+        productPageUrl: pageUrl
+      });
+
+      setWishlistUI(true);
+    } catch (e) {
+      console.error("wishlist insert error:", e);
+    }
+  });
+
+  
+  if (filledHeart) filledHeart.onClick(async () => {
+    if (!authentication.loggedIn()) {
+      try { await authentication.promptLogin({ mode: "login", modal: true }); } catch { return; }
+    }
+    try {
+      const member = await getMemberSafe();
+      if (!member?._id || !currentProduct?._id) return;
+
+      const existsId = await findWishlistItemId(member._id, currentProduct._id);
+      if (existsId) await wixData.remove(WISHLIST_COLLECTION, existsId);
+      setWishlistUI(false);
+    } catch (e) {
+      console.error("wishlist remove error:", e);
+    }
+  });
+});

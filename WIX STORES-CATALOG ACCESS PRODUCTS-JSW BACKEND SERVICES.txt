@@ -1,0 +1,397 @@
+
+
+
+
+
+// backend/karmaPrimaryCat.jsw
+//import { products } from 'wix-stores.v2';
+import wixData from 'wix-data';
+
+
+/* ===================== CONFIG ===================== */
+const PAGE_LIMIT_DEFAULT = 16;
+
+// Persisted cache koleksiyon adı
+const PERSISTED_CACHE_COLLECTION = 'KarmaCache_Collections';
+// Alan adları
+const FIELD_NAME = 'name';
+const FIELD_UPDATED_AT = 'updatedAt';
+
+// Cache ayarları
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 saat
+const CACHE_MAX_SIZE = 5000;              // en çok kaç id
+const COLLECTION_QUERY_CHUNK = 50;        // Stores/Collections sorgu chunk
+const PERSISTED_QUERY_CHUNK = 200;        // cache koleksiyonu sorgu chunk
+const PERSISTED_BULK_SAVE_CHUNK = 200;    // cache bulkSave chunk
+
+/* =================== MEMORY CACHE =================== */
+const MEM = new Map();        // id -> { name, ts }
+const INFLIGHT = new Map();   // "id1,id2,...": Promise<Map<id,name>>
+
+function memGetFresh(id) {
+  const rec = MEM.get(id);
+  if (!rec) return null;
+  if (Date.now() - rec.ts > CACHE_TTL_MS) { MEM.delete(id); return null; }
+  return rec.name;
+}
+function memSet(id, name) {
+  if (MEM.has(id)) MEM.delete(id);
+  MEM.set(id, { name, ts: Date.now() });
+  while (MEM.size > CACHE_MAX_SIZE) MEM.delete(MEM.keys().next().value);
+}
+
+function uniqIds(arr = []) {
+  return Array.from(new Set(arr.map(String).map(s => s.trim()).filter(Boolean)));
+}
+function chunk(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+/* ============ PERSISTED CACHE GET/SET (güvenli) ============ */
+async function persistedGet(ids = []) {
+  const fresh = new Map();
+  if (!ids.length) return fresh;
+
+  for (const part of chunk(ids, PERSISTED_QUERY_CHUNK)) {
+    let res;
+    try {
+      res = await wixData
+        .query(PERSISTED_CACHE_COLLECTION)
+        .hasSome('_id', part)
+        .limit(PERSISTED_QUERY_CHUNK)
+        .find({ suppressAuth: true });
+    } catch (_) {
+      // Koleksiyon yok/izin yok → cache’i pas geç, DB’den çözeceğiz
+      return fresh;
+    }
+    for (const item of res.items) {
+      const id = String(item._id || '').trim();
+      const name = String(item[FIELD_NAME] || '').trim();
+      const updatedAt = item[FIELD_UPDATED_AT] ? new Date(item[FIELD_UPDATED_AT]) : null;
+      if (!id || !name || !updatedAt) continue;
+      if (Date.now() - updatedAt.getTime() <= CACHE_TTL_MS) {
+        fresh.set(id, name);
+      }
+    }
+  }
+  return fresh;
+}
+
+async function persistedSet(map /* Map<id,name> */) {
+  const items = [];
+  const now = new Date();
+  for (const [id, name] of map) {
+    items.push({ _id: id, [FIELD_NAME]: name, [FIELD_UPDATED_AT]: now });
+  }
+  for (const part of chunk(items, PERSISTED_BULK_SAVE_CHUNK)) {
+    try {
+      await wixData.bulkSave(PERSISTED_CACHE_COLLECTION, part, { suppressAuth: true });
+    } catch (_) {
+      // Koleksiyon yok/izin yok → sessiz geç (DB’den çözmeye devam edeceğiz)
+    }
+  }
+}
+
+/* ============ DB: Stores/Collections FETCH ============ */
+async function dbFetchCollections(ids = []) {
+  const out = new Map();
+  if (!ids.length) return out;
+
+  for (const part of chunk(ids, COLLECTION_QUERY_CHUNK)) {
+    let res = await wixData
+      .query('Stores/Collections')
+      .hasSome('_id', part)
+      .limit(COLLECTION_QUERY_CHUNK)
+      .find({ suppressAuth: true });
+
+    let guard = 0;
+    while (true) {
+      for (const c of res.items) {
+        const id = String(c._id || '').trim();
+        const name = String(c.name || c.title || c.label || c.slug || id).trim();
+        if (id && name) out.set(id, name);
+      }
+      if (res.hasNext() && guard++ < 20) res = await res.next(); else break;
+    }
+  }
+  return out;
+}
+
+/* ======= MASTER RESOLVER (MEM → PERSISTED → DB) ======= */
+async function resolveCollectionNames(idsInput = []) {
+  const ids = uniqIds(idsInput);
+  const result = new Map();
+  const missing = [];
+
+  // 1) Memory
+  for (const id of ids) {
+    const m = memGetFresh(id);
+    if (m) result.set(id, m); else missing.push(id);
+  }
+  if (!missing.length) return result;
+
+  // 2) Persisted
+  const persisted = await persistedGet(missing);
+  const stillMissing = [];
+  for (const id of missing) {
+    const name = persisted.get(id);
+    if (name) { result.set(id, name); memSet(id, name); }
+    else stillMissing.push(id);
+  }
+  if (!stillMissing.length) return result;
+
+  // 3) DB + write-through
+  const key = stillMissing.slice().sort().join(',');
+  if (!INFLIGHT.has(key)) {
+    INFLIGHT.set(key, (async () => {
+      const fetched = await dbFetchCollections(stillMissing);
+      for (const [id, name] of fetched) memSet(id, name);
+      try { await persistedSet(fetched); } catch(_) {}
+      return fetched;
+    })().finally(() => { setTimeout(() => INFLIGHT.delete(key), 0); }));
+  }
+  const fetched = await INFLIGHT.get(key);
+  for (const [id, name] of fetched) result.set(id, name);
+
+  return result;
+}
+
+/* ======= ÜRÜN TARAMA YARDIMCILARI ======= */
+async function collectPrimaryCollectionIdsFast() {
+  const idSet = new Set();
+  let offset = 0;
+  const limit = PAGE_LIMIT_DEFAULT;
+  let guard = 0;
+
+  while (guard++ < 200) { // 200*15=3000 ürün emniyet sınırı
+    const res = await wixData
+      .query('Stores/Products')
+      .ascending('_createdDate')
+      .limit(limit)
+      .skip(offset)
+      .find({ suppressAuth: true });
+
+    const items = res.items || [];
+    for (const p of items) {
+      const ids = Array.isArray(p?.collectionIds) ? p.collectionIds
+                : Array.isArray(p?.collections)    ? p.collections
+                : [];
+      if (ids.length) {
+        const first = String(ids[0] || '').trim();
+        if (first) idSet.add(first);
+      }
+    }
+
+    if (items.length < limit) break;
+    offset += items.length;
+  }
+
+  return Array.from(idSet);
+}
+
+async function collectAllCollectionIdsFromProducts() {
+  const idSet = new Set();
+  let offset = 0;
+  const limit = PAGE_LIMIT_DEFAULT;
+  let guard = 0;
+
+  while (guard++ < 400) { // 400*15=6000 ürün emniyet sınırı
+    const res = await wixData
+      .query('Stores/Products')
+      .ascending('_createdDate')
+      .limit(limit)
+      .skip(offset)
+      .find({ suppressAuth: true });
+
+    const items = res.items || [];
+    for (const p of items) {
+      const ids = Array.isArray(p?.collectionIds) ? p.collectionIds
+                : Array.isArray(p?.collections)    ? p.collections
+                : [];
+      for (const id of ids) {
+        const v = String(id || '').trim();
+        if (v) idSet.add(v);
+      }
+    }
+
+    if (items.length < limit) break;
+    offset += items.length;
+  }
+  return { allIds: Array.from(idSet) };
+}
+
+/* ======= PUBLIC: KATEGORİ (dropdown) ======= */
+/**
+ * Koleksiyon listesini her koşulda döndürür:
+ * 1) Normal akış: ürünlerden primary id'ler → isim çöz (cache destekli)
+ * 2) Fallback A: Stores/Collections'tan doğrudan liste
+ * 3) Fallback B: ürünlerden görünen TÜM collectionId'ler → isim çöz
+ */
+/**
+ * KATEGORİ LİSTESİ — önce doğrudan Stores/Collections, sonra fallback'ler
+ * Her koşulda { value: collectionId, label: name }[] döndürmeye çalışır.
+ */
+// (Mevcut dosyanın başında: import wixData from 'wix-data'; zaten var)
+// NOT: 'collections' import'u YOK. 'wix-stores.v2' içinden 'collections' çekmiyoruz.
+
+/**
+ * KATEGORİ LİSTESİ — önce Stores/Collections, sonra fallback'ler
+ * Her koşulda { value, label }[] döndürmeye çalışır.
+ */
+export async function fetchPrimaryCategoryOptions() {
+  // --- A) Doğrudan Stores/Collections'tan liste
+  try {
+    let res = await wixData.query('Stores/Collections')
+      .ascending('name')
+      .limit(100) // Wix App Collections limit 100
+      .find({ suppressAuth: true });
+
+    const arr = [];
+    let guard = 0;
+
+    // UYARISIZ SAYFALAMA: do…while benzeri
+    for (;;) {
+      for (const c of res.items || []) {
+        const id = String(c._id || '').trim();
+        const label = String(
+          c.name?.original ?? c.name ?? c.title ?? c.label ?? c.slug ?? id
+        ).trim();
+        if (id) arr.push({ value: id, label });
+      }
+      if (!(res.hasNext() && guard++ < 20)) break;
+      res = await res.next();
+    }
+
+    // WRITE-THROUGH → hem memory hem persisted cache’e yaz
+    if (arr.length > 0) {
+      const map = new Map();
+      for (const { value, label } of arr) {
+        map.set(value, label);
+        try { memSet(value, label); } catch (_) {}
+      }
+      try { await persistedSet(map); } catch (_) {}
+
+      arr.sort((a, b) => a.label.localeCompare(b.label, 'tr'));
+      return arr;
+    }
+  } catch (_) {
+    // izin/erişim sorunu olursa sessiz geç → fallback
+  }
+
+  // --- B) Fallback 1: Ürünlerden primary collectionId'leri topla → isim çöz
+  try {
+    const primaryIds = await collectPrimaryCollectionIdsFast();
+    if (primaryIds.length) {
+      const idNameMap = await resolveCollectionNames(primaryIds);
+      const arr = primaryIds.map(id => ({ value: id, label: idNameMap.get(id) || id }));
+      if (arr.length) {
+        arr.sort((a, b) => a.label.localeCompare(b.label, 'tr'));
+        return arr;
+      }
+    }
+  } catch (_) {}
+
+  // --- C) Fallback 2: Ürünlerden TÜM collectionId'leri topla → isim çöz
+  try {
+    const { allIds } = await collectAllCollectionIdsFromProducts();
+    if (allIds.length) {
+      const idNameMap2 = await resolveCollectionNames(allIds);
+      const arr2 = allIds.map(id => ({ value: id, label: idNameMap2.get(id) || id }));
+      arr2.sort((a, b) => a.label.localeCompare(b.label, 'tr'));
+      return arr2;
+    }
+  } catch (_) {}
+
+  // Son çare
+  return [];
+}
+
+
+/* ===================== INIT / HEALTH ===================== */
+
+// Koleksiyon yoksa anlamaya çalış
+function isCollectionMissingError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    msg.includes('collection does not exist') ||
+    msg.includes('collection not found') ||
+    msg.includes('does not exist') ||
+    msg.includes('unknown collection')
+  );
+}
+
+/**
+ * Persisted cache koleksiyonunun varlığını ve yazılabilirliğini test eder.
+ * - Yoksa: exists=false (programatik oluşturamıyoruz; Content Manager’dan oluşturulmalı)
+ * - Varsa: probe kaydı yazar/okur/siler → writeOk=true ise alanlar ve izinler tamamdır.
+ */
+export async function initKarmaCacheCollections() {
+  // 1) Var mı?
+  try {
+    await wixData.query(PERSISTED_CACHE_COLLECTION).limit(1).find({ suppressAuth: true });
+  } catch (e) {
+    if (isCollectionMissingError(e)) {
+      return {
+        exists: false,
+        writeOk: false,
+        message:
+          `Koleksiyon '${PERSISTED_CACHE_COLLECTION}' bulunamadı. Content Manager’da oluştur:\n` +
+          `- _id (Text, PK), ${FIELD_NAME} (Text), ${FIELD_UPDATED_AT} (Datetime)\n` +
+          `- Permissions: Back-end only (veya backend write izni)\n`
+      };
+    }
+    return { exists: false, writeOk: false, message: `Kontrol hatası: ${e?.message || e}` };
+    }
+
+  // 2) Yazılabiliyor mu? probe
+  const probeId = '__schema_probe__';
+  const now = new Date();
+  const probeDoc = { _id: probeId, [FIELD_NAME]: '__ok__', [FIELD_UPDATED_AT]: now };
+
+  try {
+    await wixData.save(PERSISTED_CACHE_COLLECTION, probeDoc, { suppressAuth: true });
+    const got = await wixData.get(PERSISTED_CACHE_COLLECTION, probeId, { suppressAuth: true });
+    const ok = !!got && got[FIELD_NAME] === '__ok__';
+    try { await wixData.remove(PERSISTED_CACHE_COLLECTION, probeId, { suppressAuth: true }); } catch (_) {}
+    if (ok) return { exists: true, writeOk: true, message: 'Koleksiyon mevcut ve yazma/okuma başarılı.' };
+    return { exists: true, writeOk: false, message: 'Okuma/doğrulama başarısız. Permissions/Fields kontrol et.' };
+  } catch (e) {
+    return { exists: true, writeOk: false, message: `Probe yazılamadı: ${e?.message || e}` };
+  }
+}
+
+export async function getCacheHealthSummary() {
+  const r = await initKarmaCacheCollections();
+  return `[${PERSISTED_CACHE_COLLECTION}] exists=${r.exists}, writeOk=${r.writeOk} → ${r.message}`;
+}
+
+
+// Sadece persisted cache'ten okur; hızlıdır (DB App Collections'a gitmez)
+export async function getCachedCategoryOptions() {
+  try {
+    let res = await wixData.query(PERSISTED_CACHE_COLLECTION)
+      .ascending(FIELD_NAME)       // 'name' alanına göre sırala
+      .limit(1000)
+      .find({ suppressAuth: true });
+
+    const arr = [];
+    let guard = 0;
+    for (;;) {
+      for (const it of res.items || []) {
+        const id = String(it._id || '').trim();
+        const label = String(it[FIELD_NAME] || id).trim();
+        if (id) arr.push({ value: id, label });
+      }
+      if (!(res.hasNext() && guard++ < 20)) break;
+      res = await res.next();
+    }
+
+    arr.sort((a, b) => a.label.localeCompare(b.label, 'tr'));
+    return arr;
+  } catch (_) {
+    return [];
+  }
+}
+

@@ -1,0 +1,545 @@
+
+
+
+
+////  BU DOSYALAR KULLANIMDADIR    ////
+////  BU DOSYALAR KULLANIMDADIR    ////
+////  BU DOSYALAR KULLANIMDADIR    ////
+////  BU DOSYALAR KULLANIMDADIR    ////
+
+import wixData from 'wix-data';
+import { fetchPrimaryCategoryOptions, getCachedCategoryOptions, getCacheHealthSummary } from 'backend/karmaProducts.jsw';
+import wixLocationFrontend from 'wix-location-frontend';
+import { refreshCart } from 'wix-ecom-frontend';
+import { addProductToCurrentCart } from 'backend/cart';
+import { subscribe } from 'wix-realtime';
+
+// 🚨🚨🚨  PATCH-0: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+import { currentMember, authentication } from "wix-members-frontend";
+const WISHLIST_COLLECTION = "Import1";
+// 🚨🚨🚨  PATCH-0: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+// 🚨🚨🚨  PATCH-0: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+// PATCH-0: WISHLIST altyapısı için importlar + sabitler + yardımcılar
+// Wix görsel URL normalize
+function normalizeWixImage(media) {
+    if (!media) return "";
+    const str = String(media);
+    if (/^https?:\/\//i.test(str)) return str;
+    const m = str.match(/^wix:image:\/\/v1\/([^/]+)\/file/i);
+    return m ? `https://static.wixstatic.com/media/${m[1]}` : str;
+}
+
+// Güvenli üye çek
+async function getMemberSafe() {
+    try { return await currentMember.getMember({ fieldsets: ['FULL'] }); } catch { return undefined; }
+}
+
+// Bu ürün zaten wishlist’te mi?
+async function findWishlistItemId(userId, productId) {
+    const res = await wixData
+        .query(WISHLIST_COLLECTION)
+        .eq("userId", userId)
+        .eq("productId", productId)
+        .limit(1)
+        .find();
+    return res.items?.[0]?._id || null;
+}
+
+// Item içindeki kalp UI’sını ayarla (repeater item’ına özel)
+function setWishlistUIForItem($item, isIn) {
+    try {
+        const emptyHeart = $item("#DeleteFromWishListEmpty"); // EKLE
+        const filledHeart = $item("#addToWishListFilled"); // SİL
+        if (isIn) {
+            filledHeart?.show();
+            emptyHeart?.hide();
+        } else {
+            emptyHeart?.show();
+            filledHeart?.hide();
+        }
+    } catch (_) {}
+}
+
+// safeSetText: HTML desteklemeyen Text ise düz .text kullan
+function safeSetTextSmart($elem, textHtml, fallbackPlainText) {
+    try {
+        if ('html' in $elem) {
+            // HTML içindeki tıklamaların butona geçmesi için pointer-events kapatırız
+            $elem.html = `<div style="pointer-events:auto">${textHtml}</div>`;
+            return;
+        }
+    } catch (_) {}
+    try { $elem.text = fallbackPlainText || textHtml.replace(/<br\s*\/?>/gi, '\n'); } catch (_) {}
+}
+
+// 🚨🚨🚨  PATCH-0: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+// 🚨🚨🚨  PATCH-1: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+// PATCH-1: Repeater item’ı için wishlist state boyama + click handler kurulum
+async function paintWishlistStateItem($item, itemData) {
+    // Ürün ID’sini her veri kaynağı ihtimaline göre yakala
+    const productId =
+        itemData?._id ||
+        itemData?.productId ||
+        itemData?.["storesProducts._id"] ||
+        itemData?.["dataset._id"];
+
+    if (!productId) { setWishlistUIForItem($item, false); return; }
+
+    // Login kontrolü
+    const member = await getMemberSafe();
+    const isLoggedIn = !!member?._id;
+
+    // Repeater’daki kalpler
+    const emptyHeart = $item("#DeleteFromWishListEmpty"); // EKLE
+    const filledHeart = $item("#addToWishListFilled"); // SİL
+
+    // Item’ın ihtiyaç duyacağı temel alanlar (görsel, ad, fiyat, sayfa)
+    // Siz “WIX Stores/Products” dataset’ine bağlısınız: itemData genelde name, price, mediaUrl/ mainMedia vb. barındırır.
+    const productName = (itemData?.name || "").trim();
+    const productPrice = (itemData?.formattedPrice || itemData?.priceFormatted || itemData?.price?.formatted || "");
+    const productMedia = itemData?.mainMedia || itemData?.mediaUrl || itemData?.image || "";
+    const productImgUrl = normalizeWixImage(productMedia);
+    const productPageUrl = (itemData?.productPageUrl || itemData?.linkProductPage || "");
+
+    // Ürün şu an listede mi?
+    let existsId = null;
+    try {
+        if (isLoggedIn) existsId = await findWishlistItemId(member._id, productId);
+    } catch (e) { console.warn('wishlist query error:', e); }
+
+    // Başlangıç UI
+    setWishlistUIForItem($item, !!existsId);
+
+    // Tıklama — EKLE (boş kalp)
+    if (emptyHeart) emptyHeart.onClick(async () => {
+        // Login değilse login prompt
+        if (!authentication.loggedIn()) {
+            try { await authentication.promptLogin({ mode: "login", modal: true }); } catch { return; }
+        }
+        try {
+            const m = await getMemberSafe();
+            if (!m?._id) return;
+
+            // Çift eklemeyi önle
+            const again = await findWishlistItemId(m._id, productId);
+            if (again) { setWishlistUIForItem($item, true); return; }
+
+            await wixData.insert(WISHLIST_COLLECTION, {
+                userId: m._id,
+                productId: productId,
+                productImage: productImgUrl,
+                productName: productName,
+                productPrice: productPrice,
+                productPageUrl: productPageUrl
+            });
+
+            setWishlistUIForItem($item, true);
+        } catch (e) {
+            console.error("wishlist insert error:", e);
+        }
+    });
+
+    // Tıklama — SİL (dolu kalp)
+    if (filledHeart) filledHeart.onClick(async () => {
+        if (!authentication.loggedIn()) {
+            try { await authentication.promptLogin({ mode: "login", modal: true }); } catch { return; }
+        }
+        try {
+            const m = await getMemberSafe();
+            if (!m?._id) return;
+
+            const id = await findWishlistItemId(m._id, productId);
+            if (id) await wixData.remove(WISHLIST_COLLECTION, id);
+
+            setWishlistUIForItem($item, false);
+        } catch (e) {
+            console.error("wishlist remove error:", e);
+        }
+    });
+}
+
+// 🚨🚨🚨  PATCH-1: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+async function waitForDatasetReady(dataset, timeout = 5000) {
+    if (dataset.onReady && typeof dataset.onReady === 'function') {
+        let called = false;
+        try {
+            await new Promise((resolve) => {
+                dataset.onReady(() => {
+                    if (!called) {
+                        called = true;
+                        resolve();
+                    }
+                });
+                setTimeout(() => {
+                    if (!called) {
+                        called = true;
+                        resolve();
+                    }
+                }, timeout);
+            });
+        } catch (_) {}
+    }
+}
+
+$w.onReady(async function () {
+
+    const dataset = $w("#dataset1"); // Stores/Products dataset
+    const categoryDropdown = $w("#collections"); // Dropdown (label=value=collectionId)
+    const productCountText = $w("#productCountText"); // Sayaç
+    const aramaKutusu = $w("#aramaKutusu"); // (opsiyon)
+    const aramaDugmesi = $w("#aramaDugmesi"); // (opsiyon)
+
+    productCountText.text = "0";
+    categoryDropdown.disable();
+
+    // 🚨🚨🚨  PATCH-2: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+    // PATCH-2: login/logout olduğunda listedeki kalpleri yeniden boya
+    try {
+        authentication.onLogin(() => {
+            try {
+                $w('#repeater').forEachItem(($item, itemData) => paintWishlistStateItem($item, itemData));
+            } catch (_) {}
+        });
+        authentication.onLogout(() => {
+            try {
+                $w('#repeater').forEachItem(($item) => setWishlistUIForItem($item, false));
+            } catch (_) {}
+        });
+    } catch (_) {}
+
+    // 🚨🚨🚨  PATCH-2: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+    try {
+
+        (async () => {
+
+            try {
+
+                const totalCount = await wixData.query("Stores/Products").count();
+                productCountText.text = `${totalCount}`;
+
+            } finally {
+
+            }
+        })();
+
+        const cached = await getCachedCategoryOptions();
+
+        if (cached.length > 0) {
+
+            categoryDropdown.options = [{ label: "Tüm Kategoriler", value: "" }, ...cached];
+            categoryDropdown.enable();
+
+        } else {
+
+            categoryDropdown.options = [{ label: "Yükleniyor...", value: "" }];
+            categoryDropdown.enable();
+        }
+
+        (async () => {
+
+            let fresh = [];
+            try {
+                fresh = await fetchPrimaryCategoryOptions();
+            } catch (_) {}
+
+            if (Array.isArray(fresh) && fresh.length > 0) {
+                const prevValue = categoryDropdown.value || "";
+                const newOptions = [{ label: "Tüm Kategoriler", value: "" }, ...fresh];
+
+                const oldJson = JSON.stringify(categoryDropdown.options);
+                const newJson = JSON.stringify(newOptions);
+                if (oldJson !== newJson) {
+
+                    categoryDropdown.options = newOptions;
+
+                    const stillExists = newOptions.some(o => o.value === prevValue);
+                    categoryDropdown.value = stillExists ? prevValue : "";
+
+                }
+            } else if (!cached.length) {
+
+                categoryDropdown.options = [{ label: "Kategori bulunamadı", value: "" }];
+            }
+        })();
+
+    } catch (err) {
+        console.error("🚨 Sayfa kurulumu sırasında hata:", err);
+    }
+
+    async function applyAllFilters() {
+
+        try {
+            productCountText.hide();
+
+            const searchTerm = (aramaKutusu?.value || "").trim();
+            const selectedId = (categoryDropdown?.value || "").trim(); // collectionId
+
+            let base = wixData.filter();
+            if (searchTerm) base = base.contains("name", searchTerm); // primary alan: name
+
+            let final = base;
+            if (selectedId) {
+                const f1 = wixData.filter().hasSome("collectionIds", [selectedId]);
+                const f2 = wixData.filter().hasSome("collections", [selectedId]);
+                final = base.and(f1.or(f2));
+            }
+
+            await dataset.setFilter(final);
+            await dataset.refresh();
+            await waitForDatasetReady(dataset);
+
+            productCountText.text = `${dataset.getTotalCount()}`;
+            productCountText.show();
+        } catch (e) {
+            console.error('applyAllFilters hata:', e);
+            productCountText.show();
+        }
+
+    }
+
+    if (aramaDugmesi) aramaDugmesi.onClick(() => applyAllFilters());
+    categoryDropdown.onChange(() => applyAllFilters());
+    if (aramaKutusu?.onKeyPress) {
+        aramaKutusu.onKeyPress((ev) => { if (ev.key === 'Enter') applyAllFilters(); });
+    }
+
+    $w("#repeater").onItemReady(($item, itemData, index) => {
+        const nameElement = $item("#prodNameText");
+        const quantityInput = $item("#quantityInput");
+        const plusButton = $item("#plusButton");
+        const minusButton = $item("#minusButton");
+        const addToCartButton = $item("#addToCartButton");
+        const buyNowButton = $item("#buyNowButton");
+
+        const textInsideButtonCart = $item("#textInsideButtonCart");
+        const textInsideButtonBuy = $item("#textInsideButtonBuy");
+
+        const productId =
+            itemData?._id ||
+            itemData?.productId ||
+            itemData?.["storesProducts._id"] ||
+            itemData?.["dataset._id"];
+        //console.log("productId",productId);
+        const productNameText = (itemData.name || nameElement?.text || "").trim();
+        const quantityStep = parseStepFromName(productNameText) || 1;
+
+        let currentQuantity = quantityStep;
+        quantityInput.value = String(currentQuantity);
+
+        safeSetText(textInsideButtonCart, "Sepete<br>Ekleyiniz", {
+            containerHeightPx: 25,
+            align: 'center',
+            topPadPx: 0,
+            bottomPadPx: 0,
+            yShiftPx: -8,
+            fontPx: 12,
+            lineH: 1.15
+        });
+        safeSetText(textInsideButtonBuy, "Satın<br>Alınız", {
+            containerHeightPx: 25,
+            align: 'center',
+            topPadPx: 0,
+            bottomPadPx: 0,
+            yShiftPx: -8,
+            fontPx: 12,
+            lineH: 1.15
+        });
+
+        addToCartButton.enable();
+        buyNowButton.enable();
+
+        plusButton.onClick(() => {
+            currentQuantity += quantityStep;
+            quantityInput.value = String(currentQuantity);
+        });
+
+        minusButton.onClick(() => {
+            if (currentQuantity > quantityStep) {
+                currentQuantity -= quantityStep;
+                quantityInput.value = String(currentQuantity);
+            }
+        });
+
+        quantityInput.onBlur(() => {
+            const normalized = normalizeToStepSafe(quantityInput.value, quantityStep);
+            currentQuantity = normalized;
+            quantityInput.value = String(normalized);
+        });
+
+        quantityInput.onKeyPress((event) => {
+            if (event.key === "Enter") {
+                const normalized = normalizeToStepSafe(quantityInput.value, quantityStep);
+                currentQuantity = normalized;
+                quantityInput.value = String(normalized);
+            }
+        });
+
+        const handleAddToCart = async () => {
+            if (!productId) {
+                console.warn("Ürün _id bulunamadı; CMS bağlantılarını kontrol edin.");
+                return;
+            }
+            lockButtons(addToCartButton, buyNowButton, true);
+
+            safeSetText(textInsideButtonCart, "Sepete<br>Ekleniyor", {
+                containerHeightPx: 25,
+                align: 'center',
+                topPadPx: 0,
+                bottomPadPx: 0,
+                yShiftPx: -8,
+                fontPx: 12,
+                lineH: 1.15
+            });
+
+            try {
+                await addProductToCurrentCart(productId, currentQuantity); // backend
+                await refreshCart();
+                safeSetText(textInsideButtonCart, "Sepete<br>Eklendi", {
+                    containerHeightPx: 25,
+                    align: 'center',
+                    topPadPx: 0,
+                    bottomPadPx: 0,
+                    yShiftPx: -8,
+                    fontPx: 12,
+                    lineH: 1.15
+                });
+
+                setTimeout(() => safeSetText(textInsideButtonCart, "Sepete<br>Ekleyiniz", { containerHeightPx: 25, align: 'center', topPadPx: 0, bottomPadPx: 0, yShiftPx: -8, fontPx: 12, lineH: 1.15 }));
+            } catch (error) {
+                console.error("Add to cart error:", error);
+                safeSetText(textInsideButtonCart, "Error!<br>Please try again", { bottomPadPx: 0, align: 'center' });
+            } finally {
+                lockButtons(addToCartButton, buyNowButton, false);
+            }
+        };
+
+        const handleBuyNow = async () => {
+            if (!productId) {
+                console.warn("Ürün _id bulunamadı; CMS bağlantılarını kontrol edin.");
+                return;
+            }
+            lockButtons(addToCartButton, buyNowButton, true);
+
+            safeSetText(textInsideButtonBuy, "Sepete<br>Gidiyoruz", {
+                containerHeightPx: 25,
+                align: 'center',
+                topPadPx: 0,
+                bottomPadPx: 0,
+                yShiftPx: -8,
+                fontPx: 12,
+                lineH: 1.15
+            });
+
+            try {
+                wixLocationFrontend.to("/karma-sepet");
+            } catch (error) {
+                console.error("Buy Now error:", error);
+                safeSetText(textInsideButtonBuy, "Error", { bottomPadPx: 0, align: 'center' });
+                setTimeout(() => safeSetText(textInsideButtonBuy, "Satın<br>Alınız", { containerHeightPx: 25, align: 'center', topPadPx: 0, bottomPadPx: 0, yShiftPx: -8, fontPx: 12, lineH: 1.15 }), 1500);
+                lockButtons(addToCartButton, buyNowButton, false);
+            }
+        };
+
+        addToCartButton.onClick(handleAddToCart);
+        buyNowButton.onClick(handleBuyNow);
+        // 🚨🚨🚨  PATCH-3: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+
+        // PATCH-3: onItemReady sonunda wishlist state’ini boya + tıklamaları çalıştır
+        paintWishlistStateItem($item, itemData);
+
+        // BONUS: “textInsideButtonCart/Buy” tıklamaları butona da aksetsin
+        //try { $item("#textInsideButtonCart")?.onClick(() => addToCartButton.click()); } catch (_) {}
+        //try { $item("#textInsideButtonBuy")?.onClick(() => buyNowButton.click()); } catch (_) {}
+
+        // 🚨🚨🚨  PATCH-3: WISHLIST altyapısı için importlar + sabitler + yardımcılar  🚨🚨🚨 //
+        if (textInsideButtonCart?.onClick) textInsideButtonCart.onClick(handleAddToCart);
+        if (textInsideButtonBuy?.onClick) textInsideButtonBuy.onClick(handleBuyNow);
+    });
+
+});
+
+/* ----------------- existing helpers ----------------- */
+/*
+function parseStepFromName(name) {
+  const paren = name.match(/\(([^)]*?)\)/); 
+  if (!paren) return 1;
+  const inner = paren[1];
+  const m = /(?:\(\s*)?(\d{1,6})\s*adet\b/i.exec(name);
+  return m ? parseInt(m[1], 10) : 1;
+}
+*/
+function parseStepFromName(name) {
+    // Aranan kalıplar:
+    // (12 Adet x ₺25)
+    // (10 kutu x ₺114)
+    // (12Adetx ₺25)
+    const m = /(?:\(\s*)?(\d{1,6})\s*(?:adet|kutu|paket|set|çift|parça)?\s*x/i.exec(name || "");
+    return m ? Math.max(1, parseInt(m[1], 10) || 1) : 1;
+}
+
+function normalizeToStepSafe(valueStr, step) {
+    const raw = Number(valueStr);
+    const safe = Number.isFinite(raw) ? raw : step;
+    return normalizeToStep(Math.max(safe, step), step);
+}
+
+function normalizeToStep(value, step) {
+    const down = Math.floor(value / step) * step;
+    const up = Math.ceil(value / step) * step;
+    return (value - down) < (up - value) ? Math.max(step, down) : Math.max(step, up);
+}
+
+function lockButtons(a, b, locked) {
+    if (!a || !b) return;
+    if (locked) {
+        a.disable();
+        b.disable();
+    } else {
+        a.enable();
+        b.enable();
+    }
+}
+
+function safeSetText($elem, text, {
+    fontPx = 10,
+    lineH = 1.15,
+    color = '#000',
+    topPadPx = 0,
+    bottomPadPx = 0,
+    align = 'center',
+    yShiftPx = 0,
+    containerHeightPx = 0
+} = {}) {
+    if (!$elem) return;
+    let alignItems = 'center';
+    if (align === 'bottom') alignItems = 'flex-end';
+    if (align === 'top') alignItems = 'flex-start';
+
+    let h = containerHeightPx;
+    if (!h) { try { h = Math.round(Number($elem["height"])) || 0; } catch (_) {} }
+    const heightStyle = h ? `height:${h}px;` : `height:100%;`;
+
+    $elem.html = `
+    <div style="
+      display:flex; align-items:${alignItems}; justify-content:center;
+      ${heightStyle} width:100%; box-sizing:border-box;
+      padding:${topPadPx}px 0 ${bottomPadPx}px 0; margin:0; color:${color};
+      font-weight:bold; font-size:${fontPx}px; line-height:${lineH};
+      text-align:center; word-break:break-word;">
+      <span style="display:block; width:100%; text-align:center; transform: translateY(${yShiftPx}px);">
+        ${text}
+      </span>
+    </div>
+  `;
+}
+/*
+$w('#wishListBox').onMouseIn((event) => {
+        
+})
+*/

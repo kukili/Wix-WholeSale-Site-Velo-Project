@@ -1,0 +1,315 @@
+
+
+
+
+////  BU DOSYALAR KULLANIMDADIR
+
+import { Permissions, webMethod } from "wix-web-module";
+import { currentCart, checkout, checkoutSettings } from 'wix-ecom-backend';
+import { products } from 'wix-stores.v2';
+import { getCurrentCart } from 'wix-stores-backend';
+import { publish } from 'wix-realtime-backend';
+import { currentUser as backendUser } from 'wix-users-backend';
+import { currentMember } from "wix-members-backend";
+
+const WIX_STORES_APP_ID = "215238eb-22a5-4c36-9e7b-e7c08025e04e";
+
+/// ✅✅✅ PATCH-1: Realtime yayıncı helper (imports'un ALTINA ekle) ✅✅✅ ///
+// PATCH-1: Realtime yayıncı helper (imports'un ALTINA ekle)
+// Kullanıcı/ziyaretçi kimliği
+
+// Üye/ziyaretçi kimliği
+async function getActorId() {
+    try {
+        const member = await currentMember.getMember();
+        return member?._id || 'guest';
+    } catch (_) {
+        return 'guest';
+    }
+}
+
+// Realtime kanal adı (tek bir global channel)
+const CART_CHANNEL = { name: 'cart-global-Q1w2e3r4@2025!' };
+
+// Güvenli sepet özeti (qty + cartId)
+async function readCartSummary() {
+    try {
+        const c = await currentCart.getCurrentCart();
+        const qty = Array.isArray(c?.lineItems) ?
+            c.lineItems.reduce((s, it) => s + (it.quantity || 0), 0) :
+            0;
+        const cartId = c?._id || null;
+        const currency = c?.currency || 'TRY';
+        return { qty, cartId, currency };
+    } catch (_) {
+        return { qty: 0, cartId: null, currency: 'TRY' };
+    }
+}
+
+// Yayıncılar
+async function broadcastCartChanged(source, extra = {}) {
+    try {
+        const [actorId, summary] = await Promise.all([getActorId(), readCartSummary()]);
+        await publish(
+            CART_CHANNEL, // sadece name property
+            {
+                type: 'cart-changed',
+                source, // 'add' | 'remove' | 'change-qty' | 'update-cart' | 'coupon-added' | 'coupon-removed' ...
+                //ts: Date.now(),
+                actorId, // login ise member._id, değilse 'guest'
+                cartId: summary.cartId, // varsa
+                quantity: summary.qty, // toplam adet
+                //currency: summary.currency,
+                ...extra // istersen itemDelta vb. ek bilgiler
+            }
+        );
+    } catch (e) {
+        console.warn('[broadcastCartChanged] publish failed:', e?.message || e);
+    }
+}
+
+async function broadcastCartDeleted(source, extra = {}) {
+    try {
+        const actorId = await getActorId();
+        await publish(
+            CART_CHANNEL, {
+                type: 'cart-deleted',
+                source, // 'remove-last' | 'delete-cart' vs.
+                ts: Date.now(),
+                actorId,
+                cartId: null,
+                quantity: 0
+            }
+        );
+    } catch (e) {
+        console.warn('[broadcastCartDeleted] publish failed:', e?.message || e);
+    }
+}
+
+/// ✅✅✅ PATCH-1: Realtime yayıncı helper (imports'un ALTINA ekle) ✅✅✅ ///
+
+export async function addProductToCurrentCart(productId, quantity) {
+    if (!productId || !Number(quantity)) {
+        throw new Error("addProductToCurrentCart: Geçersiz productId / quantity");
+    }
+
+    const options = {
+        lineItems: [{
+            catalogReference: {
+                appId: WIX_STORES_APP_ID,
+                catalogItemId: productId
+
+            },
+            quantity: Number(quantity)
+        }]
+    };
+
+    const result = await currentCart.addToCurrentCart(options);
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartChanged('add', { itemDelta: +Number(quantity || 0) });
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return result?.cart || result;
+}
+
+export async function getCheckoutWarning() {
+    try {
+        const { checkoutId } = await currentCart.createCheckoutFromCurrentCart({
+            channelType: "WIX_APP_STORE"
+        });
+        const retrievedCheckout = await checkout.getCheckout(checkoutId);
+        return retrievedCheckout;
+    } catch (error) {
+        console.error("BACKEND getCheckoutWarning Error:", error);
+        throw new Error("Unable to get checkout data");
+    }
+}
+
+export async function getCheckoutSettingsData() {
+    const settings = await checkoutSettings.getCheckoutSettings();
+    return settings;
+}
+
+export async function deleteCheckoutCurrentCart() {
+    await currentCart.deleteCurrentCart();
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartDeleted('delete-cart');
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return;
+}
+
+export async function getCheckoutUrl() {
+    const { checkoutId } = await currentCart.createCheckoutFromCurrentCart({
+        channelType: "WIX_APP_STORE"
+    });
+    const { checkoutUrl } = await checkout.getCheckoutUrl(checkoutId);
+    return checkoutUrl;
+}
+
+export async function updateCart(toUpdate) {
+    const updatedCart = await currentCart.updateCurrentCart(toUpdate);
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartChanged('update-cart');
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return updatedCart;
+}
+
+export async function updateCouponCart() {
+    const updatedCart = await currentCart.removeCouponFromCurrentCart();
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartChanged('coupon-removed');
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return updatedCart;
+}
+
+export async function changeItemQuantity(lineItem) {
+    const updatedCart = await currentCart.updateCurrentCartLineItemQuantity([lineItem]);
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartChanged('change-qty', { lineItemId: String(lineItem?._id || '') });
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return updatedCart.cart;
+}
+
+//////////////////   v1 function removeItemFromCart   ///////////////////////////
+/*
+export async function removeItemFromCart(lineItemId) {
+    if (!lineItemId) throw new Error('lineItemId required');
+
+    const retries = 3;
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+ 
+    let cart0 = await currentCart.getCurrentCart();
+    const exists0 = Array.isArray(cart0?.lineItems) && cart0.lineItems.some(li => String(li._id) === String(lineItemId));
+    if (!exists0) {
+        
+        return await currentCart.getCurrentCart();
+    }
+    
+    await currentCart.removeLineItemsFromCurrentCart([lineItemId]);
+    
+    let fresh = null;
+    for (let i = 0; i < retries; i++) {
+        try {
+            fresh = await currentCart.getCurrentCart();
+            const stillThere = Array.isArray(fresh?.lineItems) && fresh.lineItems.some(li => String(li._id) === String(lineItemId));
+            if (!stillThere) break; // gerçekten silinmiş
+        } catch (_) {}
+        await delay(150);
+    }
+    
+    const emptyNow = !fresh || !Array.isArray(fresh.lineItems) || fresh.lineItems.length === 0;
+    if (emptyNow) {
+        try { await currentCart.deleteCurrentCart(); } catch (_) {}
+        return { lineItems: [], isEmpty: true, isDeleted: true };
+    }
+
+    return fresh;
+}
+*/
+//////////////////   v1 function removeItemFromCart   ///////////////////////////
+
+//////////////////   v2 function removeItemFromCart   ///////////////////////////
+// backend/cart.js veya ilgili backend dosyanız
+export async function removeItemFromCart(lineItemId) {
+    if (!lineItemId) throw new Error('lineItemId required');
+
+    const retries = 4; // 3 yerine 4 deneme (toplam 5 kontrol)
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    let cart0 = await currentCart.getCurrentCart();
+    const exists0 = Array.isArray(cart0?.lineItems) && cart0.lineItems.some(li => String(li._id) === String(lineItemId));
+    if (!exists0) {
+        return cart0; // Öğe yoksa güncel sepeti döndür
+    }
+    //console.log("  //// 🚫🚫 ❌❌  removeItemFromCart  CART.JSW  ❌❌ 🚫🚫  ////  ❌❌ 🚫🚫 lineItemId 🚫🚫 ❌❌ ", lineItemId);
+    await currentCart.removeLineItemsFromCurrentCart([lineItemId]);
+
+    let fresh = null;
+    for (let i = 0; i < retries; i++) {
+        try {
+            fresh = await currentCart.getCurrentCart();
+            const stillThere = Array.isArray(fresh?.lineItems) && fresh.lineItems.some(li => String(li._id) === String(lineItemId));
+            if (!stillThere) break; // gerçekten silinmiş
+        } catch (e) {
+            console.warn(`[removeItemFromCart] Sepet çekme hatası (Retry ${i+1}):`, e.message);
+        }
+        await delay(200); // 150ms yerine 200ms bekleme
+    }
+
+    const emptyNow = !fresh || !Array.isArray(fresh.lineItems) || fresh.lineItems.length === 0;
+    if (emptyNow) {
+        try { await currentCart.deleteCurrentCart(); } catch (_) {}
+        /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+        await broadcastCartDeleted('remove-last'); // 👈 EKLEDİK
+        /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+        return { lineItems: [], isEmpty: true, isDeleted: true };
+    }
+    // Boş değilse:
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    await broadcastCartChanged('remove', { removedLineItemId: String(lineItemId) }); // 👈 EKLEDİK
+    /// ✅✅✅ PATCH: Realtime yayıncı ✅✅✅ ///
+    return fresh;
+}
+//////////////////   v2 function removeItemFromCart   ///////////////////////////
+
+export async function getCart() {
+    try {
+        const cart = await currentCart.getCurrentCart();
+
+        return cart;
+    } catch (error) {
+        //console.error(error);
+        // 🚀 İYİLEŞTİRME BAŞLANGICI
+
+        // Hata mesajında sepetin bulunamadığına dair anahtar kelimeler içeriyorsa (OWNED_CART_NOT_FOUND)
+        if (error.message.includes('OWNED_CART_NOT_FOUND') || error.message.includes('Cart not found')) {
+
+            // Bu beklenen bir durum olduğu için, Wix günlüğüne sadece Bilgi (Info) seviyesinde log at
+            //console.log("[getCart] Sepet bulunamadı, boş sepet döndürülüyor (Beklenen durum).");
+
+            // Sepet bulunamasa bile, ön yüze geçerli bir boş sepet nesnesi döndürülmeli.
+            return { lineItems: [], isEmpty: true };
+        }
+
+        // Diğer, beklenmedik hataları logla ve fırlat
+        console.error("getCart beklenmedik hata:", error);
+        throw error;
+
+    }
+}
+
+export async function getCartTotals() {
+    const cartTotals = await currentCart.estimateCurrentCartTotals();
+    return cartTotals;
+}
+
+/**
+ * Ürün ID'sini kullanarak ürün sayfa URL'si için gerekli slug ve yolu döndürür.
+ * @param {string} productId - Wix Store'daki ürünün ID'si.
+ * @returns {Promise<{slug: string, path: string, name: string} | null>}
+ */
+export async function getProductSlugAndPath(productId) {
+    if (!productId) {
+        return null;
+    }
+
+    try {
+        // Hata veren 'fields' parametresi KALDIRILDI.
+        // Fonksiyon sadece productId ile çağrılıyor.
+        const productData = await products.getProduct(productId);
+
+        if (!productData?.product) {
+            console.warn(`[getProductSlugAndPath] Ürün verisi bulunamadı: ${productId}`);
+            return null;
+        }
+
+        return {
+            slug: productData.product.slug,
+            path: productData.product.productPageUrl?.path,
+            name: productData.product.name
+        };
+
+    } catch (error) {
+        console.error(`[getProductSlugAndPath] Ürün çekme hatası (${productId}):`, error);
+        return null;
+    }
+};

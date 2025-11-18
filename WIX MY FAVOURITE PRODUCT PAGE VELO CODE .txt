@@ -1,0 +1,277 @@
+
+
+
+
+
+import wixData from 'wix-data';
+import wixUsers from 'wix-users';
+import wixLocation from 'wix-location';
+import { currentMember } from 'wix-members-frontend';
+
+/// ✅ PATCH-A ///
+
+import { refreshCart } from 'wix-ecom-frontend';
+import { addProductToCurrentCart } from 'backend/cart';
+
+/// ✅ PATCH-A ///
+
+/// ✅ PATCH-A ///
+
+// PATCH-A: imports
+// PATCH-A: helpers (ürün adından step çekme + normalize + buton kilidi + metin basma)
+function parseStepFromName(name) {
+    // Ör: (12 Adet x ₺25) / (10 kutu x …) / (12Adetx …)
+    const m = /(?:\(\s*)?(\d{1,6})\s*(?:adet|kutu|paket|set|çift|parça)?\s*x/i.exec(name || "");
+    return m ? Math.max(1, parseInt(m[1], 10) || 1) : 1;
+}
+
+function normalizeToStep(value, step) {
+    const down = Math.floor(value / step) * step;
+    const up = Math.ceil(value / step) * step;
+    return (value - down) < (up - value) ? Math.max(step, down) : Math.max(step, up);
+}
+
+function normalizeToStepSafe(valueStr, step) {
+    const raw = Number(valueStr);
+    const safe = Number.isFinite(raw) ? raw : step;
+    return normalizeToStep(Math.max(safe, step), step);
+}
+
+function lockButton(btn, locked) {
+    if (!btn) return;
+    try { locked ? btn.disable() : btn.enable(); } catch (_) {}
+}
+
+function safeSetText($elem, textHtml, {
+    fontPx = 12,
+    lineH = 1.15,
+    color = '#000',
+    topPadPx = 0,
+    bottomPadPx = 0,
+    align = 'center',
+    yShiftPx = 0, // <<< HATA düzeltme: -8 değil 0 default !!
+    containerHeightPx = 25
+} = {}) {
+    if (!$elem) return;
+    let alignItems = (align === 'bottom') ? 'flex-end' : (align === 'top' ? 'flex-start' : 'center');
+    const heightStyle = containerHeightPx ? `height:${containerHeightPx}px;` : `height:100%;`;
+    try {
+        $elem.html = `
+      <div style="
+        display:flex;
+        align-items:${alignItems};   /* DİKEY ORTALAMA BURADA */
+        justify-content:center;
+        ${heightStyle}
+        width:100%;
+        box-sizing:border-box;
+        padding:${topPadPx}px 0 ${bottomPadPx}px 0;
+        margin:0;
+        color:${color};
+        font-weight:bold;
+        font-size:${fontPx}px;
+        line-height:${lineH};
+        text-align:center;">
+        <span style="display:block;width:100%;">${textHtml}</span>
+      </div>`;
+    } catch {
+        try { $elem.text = String(textHtml).replace(/<br\s*\/?>/gi, '\n'); } catch (_) {}
+    }
+}
+
+/*
+function safeSetText($elem, textHtml, {
+    fontPx = 12,
+    lineH = 1.15,
+    color = '#000',
+    topPadPx = 0,
+    bottomPadPx = 0,
+    align = 'center',
+    yShiftPx = -8,
+    containerHeightPx = 25
+} = {}) {
+    if (!$elem) return;
+    let alignItems = (align === 'bottom') ? 'flex-end' : (align === 'top' ? 'flex-start' : 'center');
+    const heightStyle = containerHeightPx ? `height:${containerHeightPx}px;` : `height:100%;`;
+    try {
+        $elem.html = `
+      <div style="
+        display:flex;align-items:${alignItems};justify-content:center;${heightStyle}
+        width:100%;box-sizing:border-box;padding:${topPadPx}px 0 ${bottomPadPx}px 0;margin:0;
+        color:${color};font-weight:bold;font-size:${fontPx}px;line-height:${lineH};text-align:center;">
+        <span style="display:block;width:100%;transform:translateY(${yShiftPx}px);">${textHtml}</span>
+      </div>`;
+    } catch {
+        try { $elem.text = String(textHtml).replace(/<br\s*\/?>/gi, '\n'); } catch (_) {}
+    }
+}
+*/
+/// ✅ PATCH-A ///
+
+$w.onReady(async function () {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] }).catch(() => undefined);
+    if (!member?._id) {
+        $w('#myWishListPage').collapse();
+        $w('#emptyWishlist').expand();
+        return;
+    }
+    const res = await wixData.query('Import1')
+        .eq('userId', member._id)
+        .limit(100)
+        .find();
+    if (res.items.length === 0) {
+        $w('#myWishListPage').collapse();
+        $w('#emptyWishlist').expand();
+        return;
+    }
+    $w('#emptyWishlist').collapse();
+    $w('#myWishListPage').expand();
+    $w('#wishlist').data = res.items;
+    /*
+    $w('#wishlist').onItemReady(($item, itemData) => {
+      $item('#productImage').src   = itemData.productImage || "";
+      $item('#name').text          = itemData.productName  || "";
+      $item('#price').text         = itemData.productPrice || "";
+      $item('#productImage').onClick(() => {
+        if (itemData.productPageUrl) wixLocation.to(itemData.productPageUrl);
+      });
+      $item('#removeItem').onClick(async () => {
+        try { await wixData.remove('Import1', itemData._id); } catch(e){ console.error(e); }
+        wixLocation.to(wixLocation.url); 
+      });
+    });
+    */
+    /// ✅ PATCH-B ///
+
+    $w('#wishlist').onItemReady(($item, itemData) => {
+        // 1) Mevcut alan bağlamaları (aynen korunur)
+        $item('#productImage').src = itemData.productImage || "";
+        $item('#name').text = itemData.productName || "";
+        $item('#price').text = itemData.productPrice || "";
+
+        $item('#productImage').onClick(() => {
+            if (itemData.productPageUrl) wixLocation.to(itemData.productPageUrl);
+        });
+
+        // 2) ÜRÜN SİLME (mevcut mantık, korunuyor)
+        $item('#removeItem').onClick(async () => {
+            try { await wixData.remove('Import1', itemData._id); } catch (e) { console.error(e); }
+            wixLocation.to(wixLocation.url); // sayfayı tazele
+        });
+
+        // 3) YENİ: Adet yönetimi + sepete ekle
+        const qtyInput = $item('#quantityInput'); // INPUT
+        const plusButton = $item('#plusButton'); // +
+        const minusButton = $item('#minusButton'); // -
+        const addBtn = $item('#addToCartButton'); // Sepete ekle BUTON
+        const addTextInside = $item('#textInsideButtonCart'); // (varsa) buton içi yazı alanı
+
+        // Wishlist koleksiyon item’ında kaydettiğimiz productId ile çalışacağız
+        // (Wishlist şemasına göre: itemData.productId zorunlu)
+        const productId = itemData?.productId || "";
+
+        // Üründeki "step" kuralı: isimden çekiyoruz (örn. "(12 Adet x ...)")
+        const productName = String(itemData?.productName || "");
+        const step = parseStepFromName(productName) || 1;
+
+        // Başlangıç miktarı
+        let currentQty = step;
+        try { qtyInput.value = String(currentQty); } catch (_) {}
+
+        // Buton içi yazıyı doldur (varsa)
+        if (addTextInside) {
+            safeSetText(addTextInside, "Sepete<br>Ekleyiniz", { containerHeightPx: 25 });
+            // iç yazı tıklanınca da sepete ekle
+            //try { addTextInside.onClick(() => addBtn.click()); } catch (_) {}
+            // ORTAK handler: buton ve iç yazı bu fonksiyonu çağıracak
+            const handleAddToCart = async () => {
+                if (!productId) {
+                    console.warn('[Wishlist] productId boş, koleksiyon satırını kontrol edin.');
+                    return;
+                }
+                lockButton(addBtn, true);
+                if (addTextInside) safeSetText(addTextInside, "Sepete<br>Ekleniyor", { containerHeightPx: 25 });
+
+                try {
+                    await addProductToCurrentCart(productId, currentQty);
+                    await refreshCart();
+                    if (addTextInside) safeSetText(addTextInside, "Sepete<br>Eklendi", { containerHeightPx: 25 });
+
+                    setTimeout(() => {
+                        if (addTextInside) safeSetText(addTextInside, "Sepete<br>Ekleyiniz", { containerHeightPx: 25 });
+                    }, 1500);
+                } catch (e) {
+                    console.error('[Wishlist] add to cart error:', e);
+                    if (addTextInside) safeSetText(addTextInside, "Hata!<br>Tekrar deneyin", { containerHeightPx: 25 });
+                } finally {
+                    lockButton(addBtn, false);
+                }
+            };
+
+            // Tıklama bağlama (BUTON)
+            if (addBtn) addBtn.onClick(handleAddToCart);
+
+            // Tıklama bağlama (İÇ YAZI)
+            if (addTextInside && addTextInside.onClick) {
+                addTextInside.onClick(handleAddToCart);
+            }
+
+        }
+
+        // + / - davranışları
+        if (plusButton) plusButton.onClick(() => {
+            currentQty += step;
+            try { qtyInput.value = String(currentQty); } catch (_) {}
+        });
+
+        if (minusButton) minusButton.onClick(() => {
+            if (currentQty > step) {
+                currentQty -= step;
+                try { qtyInput.value = String(currentQty); } catch (_) {}
+            }
+        });
+
+        // Elle giriş: step’e yuvarla, pozitif tut
+        if (qtyInput && qtyInput.onBlur) qtyInput.onBlur(() => {
+            const normalized = normalizeToStepSafe(qtyInput.value, step);
+            currentQty = normalized;
+            try { qtyInput.value = String(normalized); } catch (_) {}
+        });
+        if (qtyInput && qtyInput.onKeyPress) qtyInput.onKeyPress((ev) => {
+            if (ev.key === 'Enter') {
+                const normalized = normalizeToStepSafe(qtyInput.value, step);
+                currentQty = normalized;
+                try { qtyInput.value = String(normalized); } catch (_) {}
+            }
+        });
+
+        // Sepete ekle
+        // Sepete ekle
+        if (addBtn) addBtn.onClick(async () => {
+            if (!productId) {
+                console.warn('[Wishlist] productId boş, koleksiyon satırını kontrol edin.');
+                return;
+            }
+            lockButton(addBtn, true);
+            if (addTextInside) safeSetText(addTextInside, "Sepete<br>Ekleniyor", { containerHeightPx: 25 });
+
+            try {
+                await addProductToCurrentCart(productId, currentQty);
+                await refreshCart();
+                if (addTextInside) safeSetText(addTextInside, "Sepete<br>Eklendi", { containerHeightPx: 25 });
+
+                setTimeout(() => {
+                    if (addTextInside) safeSetText(addTextInside, "Sepete<br>Ekleyiniz", { containerHeightPx: 25 });
+                }, 1500);
+            } catch (e) {
+                console.error('[Wishlist] add to cart error:', e);
+                if (addTextInside) safeSetText(addTextInside, "Hata!<br>Tekrar deneyin", { containerHeightPx: 25 });
+            } finally {
+                lockButton(addBtn, false);
+            }
+        });
+
+    });
+
+    /// ✅ PATCH-B ///
+
+});
