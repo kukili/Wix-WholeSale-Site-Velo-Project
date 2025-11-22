@@ -1,16 +1,3 @@
-
-
-
-
-////  BU DOSYALAR KULLANIMDADIR
-////
-////
-////  BU DOSYALAR KULLANIMDADIR
-////  
-////  
-////  BU DOSYALAR KULLANIMDADIR
-
-
 import { cart } from 'wix-stores-frontend';
 import wixLocationFrontend from 'wix-location-frontend';
 import { navigateToCheckoutPage } from 'wix-ecom-frontend';
@@ -389,3 +376,4 @@ $w.onReady(async function () {
     }
   });
 });
+
