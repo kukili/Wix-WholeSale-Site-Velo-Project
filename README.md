@@ -20,6 +20,6 @@ ratio number parsed in the name of the relevant product defined through WIX Prod
 5-) "WIX PRODUCT SPECIAL LIGHTBOX PAGE VELO CODE.txt" contains the code which controls the lightbox page which controls the magnificaiton of the picture which is defined 
     in the product special page that is controlled by the codes, defined in the "WIX PRODUCT SPECIAL PAGE VELO CODE.txt" file.
 
-    <img width="1399" height="408" alt="image" src="https://github.com/user-attachments/assets/a0bfff0a-8bda-4c1f-b9bb-18bb08a35080" />
+   
 
  
