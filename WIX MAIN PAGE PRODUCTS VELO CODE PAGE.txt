@@ -2,10 +2,6 @@
 
 
 
-////  BU DOSYALAR KULLANIMDADIR    ////
-////  BU DOSYALAR KULLANIMDADIR    ////
-////  BU DOSYALAR KULLANIMDADIR    ////
-////  BU DOSYALAR KULLANIMDADIR    ////
 
 import wixData from 'wix-data';
 import { fetchPrimaryCategoryOptions, getCachedCategoryOptions, getCacheHealthSummary } from 'backend/karmaProducts.jsw';
@@ -542,4 +538,5 @@ function safeSetText($elem, text, {
 $w('#wishListBox').onMouseIn((event) => {
         
 })
+
 */
