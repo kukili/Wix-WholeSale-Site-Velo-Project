@@ -1,0 +1,8 @@
+import wixWindow from 'wix-window';
+$w.onReady(function () {
+  const ctx = wixWindow.lightbox.getContext() || {};
+  if (ctx.src) {
+    $w('#zoomImg').src = ctx.src; 
+  }
+    $w('#zoomImg').onClick(() => wixWindow.lightbox.close());
+});
