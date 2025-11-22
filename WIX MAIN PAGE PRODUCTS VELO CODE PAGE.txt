@@ -1,8 +1,3 @@
-
-
-
-
-
 import wixData from 'wix-data';
 import { fetchPrimaryCategoryOptions, getCachedCategoryOptions, getCacheHealthSummary } from 'backend/karmaProducts.jsw';
 import wixLocationFrontend from 'wix-location-frontend';
@@ -540,3 +535,4 @@ $w('#wishListBox').onMouseIn((event) => {
 })
 
 */
+
