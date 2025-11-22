@@ -17,3 +17,6 @@ ratio number parsed in the name of the relevant product defined through WIX Prod
 4-) "WIX STORES-CATALOG ACCESS PRODUCTS-JSW BACKEND SERVICES.txt" contains the code which controls the "karmaPrimaryCat.jsw" WIX Backend file that controls the access
     procedures of the WIX CMS Stores DB data which is called by the code in the  "WIX MAIN PAGE PRODUCTS VELO CODE PAGE.txt" .
 
+5-) "WIX PRODUCT SPECIAL LIGHTBOX PAGE VELO CODE.txt" contains the code which controls the lightbox page which controls the magnificaiton of the picture which is defined 
+    in the product special page that is controlled by the codes, defined in the "WIX PRODUCT SPECIAL PAGE VELO CODE.txt" file.
+ 
